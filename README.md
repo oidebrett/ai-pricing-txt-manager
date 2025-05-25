@@ -1,6 +1,6 @@
-# AI-Pricing-text Campaign Builder for MCP
+# Campaign Builder AI-Pricing.txt
 
-This project is a component of the AI-Pricing-txt project.
+This project is a component of the AI-Pricing-txt project that enables the creation and management of AI-aware Shopify campaigns.
 
 ## 🛒 AI-Aware Shopify Campaign App
 
