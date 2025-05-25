@@ -124,7 +124,9 @@ def check_header_rule(rule: dict, headers: dict) -> bool:
     value = rule.get("value", "")
     negate = rule.get("negate", False)
     
-    logger.debug(f"Checking header rule: {rule} against headers: {headers}")
+    # Log the full headers for debugging
+    logger.info(f"All headers received: {headers}")
+    logger.info(f"Checking header rule: {rule}")
     
     # Convert all header keys to lowercase for case-insensitive matching
     lowercase_headers = {k.lower(): v for k, v in headers.items()}
@@ -132,11 +134,12 @@ def check_header_rule(rule: dict, headers: dict) -> bool:
     # Get the header value using case-insensitive matching
     header_value = lowercase_headers.get(header_name)
     
-    logger.debug(f"Header '{header_name}' value: {header_value}")
+    logger.info(f"Header '{header_name}' value: {header_value}")
     
     # For exists/notExists conditions, we only care if the header is present
     if condition == "exists":
         result = header_name in lowercase_headers
+        logger.info(f"Exists check for '{header_name}': {result}")
     elif condition == "notExists":
         result = header_name not in lowercase_headers
     # For other conditions, we need both the header and the value
@@ -162,7 +165,7 @@ def check_header_rule(rule: dict, headers: dict) -> bool:
     
     # Apply negation if needed
     final_result = not result if negate else result
-    logger.debug(f"Rule result before negation: {result}, after negation: {final_result}")
+    logger.info(f"Rule result before negation: {result}, after negation: {final_result}")
     
     return final_result
 
@@ -221,10 +224,33 @@ def main(port: int, data_dir: str, log_level: str, json_response: bool) -> int:
         
         # Get request headers from context
         request_headers = {}
-        if hasattr(ctx, 'request') and hasattr(ctx.request, 'headers'):
-            # Convert headers to a dictionary
+        
+        # Try different ways to access headers
+        if hasattr(app, 'headers'):
+            # Get headers from app context
+            request_headers = app.headers
+            logger.info(f"Using headers from app context: {request_headers}")
+        elif hasattr(ctx, 'request') and hasattr(ctx.request, 'headers'):
+            # Standard way - convert headers to a dictionary
             request_headers = dict(ctx.request.headers.items())
-            logger.debug(f"Request headers: {request_headers}")
+        elif hasattr(ctx, 'request') and hasattr(ctx.request, 'scope') and 'headers' in ctx.request.scope:
+            # ASGI scope way - headers are in the scope
+            request_headers = {k.decode('utf-8').lower(): v.decode('utf-8') 
+                              for k, v in ctx.request.scope['headers']}
+        elif hasattr(ctx, 'request') and hasattr(ctx.request, 'scope') and 'original_headers' in ctx.request.scope:
+            # Get our stored headers
+            request_headers = ctx.request.scope['original_headers']
+        elif hasattr(ctx, 'scope') and 'original_headers' in ctx.scope:
+            # Direct scope access to our stored headers
+            request_headers = ctx.scope['original_headers']
+        
+        # Log all headers for debugging
+        logger.info(f"Request headers extracted: {request_headers}")
+        
+        # Check for authorization header specifically
+        auth_header = next((v for k, v in request_headers.items() 
+                           if k.lower() == 'authorization'), None)
+        logger.info(f"Authorization header found: {auth_header is not None}")
         
         # Check if campaign is active and targeting matches
         campaign_active = is_campaign_active(campaign)
@@ -349,6 +375,13 @@ def main(port: int, data_dir: str, log_level: str, json_response: bool) -> int:
     async def handle_streamable_http(scope, receive, send):
         request = Request(scope, receive)
         request_mcp_session_id = request.headers.get(MCP_SESSION_ID_HEADER)
+        
+        # Log all headers for debugging - both as dict and raw from scope
+        logger.info(f"Incoming request headers (dict): {dict(request.headers)}")
+        if 'headers' in scope:
+            raw_headers = [(k.decode('utf-8'), v.decode('utf-8')) for k, v in scope['headers']]
+            logger.info(f"Incoming request raw headers from scope: {raw_headers}")
+        
         if (
             request_mcp_session_id is not None
             and request_mcp_session_id in server_instances
@@ -375,6 +408,11 @@ def main(port: int, data_dir: str, log_level: str, json_response: bool) -> int:
                         read_stream, write_stream = streams
                         if task_status:
                             task_status.started()
+                        
+                        # Store headers in app context
+                        app.headers = dict(request.headers)
+                        logger.info(f"Stored headers in app context: {app.headers}")
+                        
                         await app.run(
                             read_stream,
                             write_stream,
@@ -385,6 +423,12 @@ def main(port: int, data_dir: str, log_level: str, json_response: bool) -> int:
                     raise RuntimeError("Task group is not initialized")
 
                 await task_group.start(run_server)
+
+                # Store the original headers in the scope for later access
+                if 'headers' in scope:
+                    # Store headers in a format that can be easily accessed later
+                    scope['original_headers'] = dict(request.headers)
+                    logger.info(f"Stored original headers in scope: {scope['original_headers']}")
 
                 # Handle the HTTP request and return the response
                 await http_transport.handle_request(scope, receive, send)
